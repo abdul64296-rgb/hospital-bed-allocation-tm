@@ -1,0 +1,57 @@
+# Hospital Bed Allocation System — Turing Machine Simulation
+
+Automata Theory class project: a Turing Machine model of a hospital bed
+allocation engine, implemented in C++.
+
+## Overview
+
+This program models bed allocation as a Turing Machine that reads a
+patient's ID and severity from a tape, scans eligible wards for a free
+bed, and **writes** the allocated ward and bed number back onto the
+tape before halting (accept) or rejecting (queue) the patient.
+
+## Why a Turing Machine (not a DFA/NFA)
+
+| Capability | DFA / NFA | This TM |
+|---|---|---|
+| Write to tape | No | Yes — writes ward + bed number |
+| Move head left | No (right only) | Yes — retries previous ward |
+| Unbounded memory | No | Yes — tape grows with allocation |
+
+## States
+
+| State | Description |
+|---|---|
+| `READ_PATIENT` (q0) | Reads patient ID from tape |
+| `CHECK_SEVERITY` (q1) | Reads severity level |
+| `SCAN_WARD` (q2) | Scans eligible wards for a free bed |
+| `MATCH_FOUND` (q3) | A ward with a free bed was found |
+| `NO_MATCH` (q4) | Ward full — retry next ward or reject |
+| `ALLOCATE` (q5) | Writes ward + bed number to tape |
+| `UPDATE_TAPE` (q6) | Finalizes the tape |
+| `HALT` (q7) | Accept (allocated) or reject (queued) |
+
+## Build & Run
+
+```bash
+g++ -std=c++17 -o hospital_tm HospitalBedTM.cpp
+./hospital_tm
+```
+
+## Files
+
+- `HospitalBedTM.cpp` — full C++ source (single file)
+- `report/` — class report with theory mapping and code screenshots
+
+## Sample Output
+
+```
+ADMITTING PATIENT: Alice M. (P001)
+Severity: CRITICAL | Ward Preference: ICU
+...
+RESULT: ALLOCATED -> Ward = ICU, Bed = 1
+```
+
+## Author
+
+Automata Theory Class Project — 2026
