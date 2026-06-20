@@ -1,0 +1,360 @@
+/* ============================================================================
+   Hospital Bed Allocation System — Turing Machine Simulation
+   ----------------------------------------------------------------------------
+   Automata Theory Class Project
+   ----------------------------------------------------------------------------
+   This program models a hospital bed allocation engine as a Turing Machine.
+
+   TAPE FORMAT:
+        [ |- ] [PatientID] [Severity] [WardPref] [ -| ]
+   After processing, the TM writes the allocated Ward and BedNo onto the
+   tape (extending it), simulating how a TM rewrites symbols.
+
+   STATES (Q):
+        q0  READ_PATIENT     - read patient ID, move right
+        q1  CHECK_SEVERITY   - read severity level, move right
+        q2  SCAN_WARD        - scan eligible wards for a free bed
+        q3  MATCH_FOUND      - a ward with a free bed was found
+        q4  NO_MATCH         - current ward is full, try next / reject
+        q5  ALLOCATE         - write ward + bed number onto tape
+        q6  UPDATE_TAPE      - finalize tape, mark allocation complete
+        q7  HALT             - accept (allocated) or reject (queued)
+
+   TAPE ALPHABET (Gamma):
+        PatientID, Severity, Ward, BedNo, |-, -|, B (blank), ALLOC
+
+   This is a genuine TM (not a DFA/NFA) because transitions:
+        - WRITE new symbols onto the tape (ward, bed number)
+        - MOVE the head in both directions (Left when retrying a ward)
+        - Use the tape itself as memory (no fixed bound on steps)
+   ============================================================================ */
+
+#include <iostream>
+#include <vector>
+#include <string>
+#include <map>
+#include <algorithm>
+#include <sstream>
+#include <iomanip>
+
+using namespace std;
+
+// ───────────────────────────── Enums & Constants ─────────────────────────────
+
+enum class State {
+    READ_PATIENT,
+    CHECK_SEVERITY,
+    SCAN_WARD,
+    MATCH_FOUND,
+    NO_MATCH,
+    ALLOCATE,
+    UPDATE_TAPE,
+    HALT
+};
+
+string stateName(State s) {
+    switch (s) {
+        case State::READ_PATIENT:   return "READ_PATIENT";
+        case State::CHECK_SEVERITY: return "CHECK_SEVERITY";
+        case State::SCAN_WARD:      return "SCAN_WARD";
+        case State::MATCH_FOUND:    return "MATCH_FOUND";
+        case State::NO_MATCH:       return "NO_MATCH";
+        case State::ALLOCATE:       return "ALLOCATE";
+        case State::UPDATE_TAPE:    return "UPDATE_TAPE";
+        case State::HALT:           return "HALT";
+    }
+    return "UNKNOWN";
+}
+
+enum Severity { LOW = 1, MEDIUM = 2, HIGH = 3, CRITICAL = 4 };
+
+string severityName(int s) {
+    switch (s) {
+        case CRITICAL: return "CRITICAL";
+        case HIGH:     return "HIGH";
+        case MEDIUM:   return "MEDIUM";
+        case LOW:      return "LOW";
+    }
+    return "UNKNOWN";
+}
+
+const char LEFT_MARKER  = '|';   // simplified representation of |-
+const char RIGHT_MARKER = '#';   // simplified representation of -|
+const char BLANK        = '_';   // blank symbol B / square
+
+// ───────────────────────────── Patient & Ward Data ─────────────────────────
+
+struct Patient {
+    string id;
+    string name;
+    int    severity;
+    string wardPref;
+};
+
+struct Ward {
+    string name;
+    int totalBeds;
+    vector<string> beds; // empty string = free, else patient ID
+
+    Ward(string n, int total) : name(n), totalBeds(total) {
+        beds.assign(total, "");
+    }
+
+    int freeBeds() const {
+        int count = 0;
+        for (auto &b : beds) if (b.empty()) count++;
+        return count;
+    }
+};
+
+// Ward eligibility based on severity (models delta's "eligible ward" check)
+map<int, vector<string>> wardAcceptance = {
+    { CRITICAL, {"ICU", "EMERGENCY", "ISOLATION"} },
+    { HIGH,     {"ICU", "EMERGENCY", "ISOLATION"} },
+    { MEDIUM,   {"EMERGENCY", "ISOLATION", "GENERAL"} },
+    { LOW,      {"GENERAL", "PEDIATRIC", "ISOLATION"} }
+};
+
+// ───────────────────────────── Tape Representation ──────────────────────────
+
+struct TapeCell {
+    string symbol;
+    string tag; // for display: "PatientID", "Severity", etc.
+};
+
+class Tape {
+public:
+    vector<TapeCell> cells;
+    int head = 0;
+
+    void build(const Patient &p) {
+        cells.clear();
+        cells.push_back({"|-", "marker"});
+        cells.push_back({p.id, "PatientID"});
+        cells.push_back({severityName(p.severity), "Severity"});
+        cells.push_back({p.wardPref.empty() ? "ANY" : p.wardPref, "WardPref"});
+        cells.push_back({"-|", "marker"});
+        head = 1; // start just after left marker
+    }
+
+    void writeAt(int pos, const string &symbol, const string &tag) {
+        if (pos == (int)cells.size()) {
+            cells.push_back({symbol, tag});
+        } else {
+            cells[pos].symbol = symbol;
+            cells[pos].tag = tag;
+        }
+    }
+
+    void insertBeforeRightMarker(const string &symbol, const string &tag) {
+        // find right marker and insert before it
+        for (size_t i = 0; i < cells.size(); i++) {
+            if (cells[i].symbol == "-|") {
+                cells.insert(cells.begin() + i, {symbol, tag});
+                return;
+            }
+        }
+        cells.push_back({symbol, tag});
+    }
+
+    void print(int highlightPos = -1) const {
+        for (size_t i = 0; i < cells.size(); i++) {
+            string s = cells[i].symbol;
+            if ((int)i == highlightPos) cout << "[" << s << "] ";
+            else cout << " " << s << "  ";
+        }
+        cout << "\n";
+    }
+};
+
+// ───────────────────────────── Turing Machine Engine ────────────────────────
+
+struct StepLog {
+    int stepNo;
+    State state;
+    int head;
+    string note;
+    string rule;
+};
+
+class HospitalTM {
+public:
+    map<string, Ward> wards;
+    vector<StepLog> log;
+    int stepCounter = 0;
+
+    HospitalTM() {
+        wards.emplace("ICU",       Ward("ICU", 6));
+        wards.emplace("GENERAL",   Ward("GENERAL", 12));
+        wards.emplace("PEDIATRIC", Ward("PEDIATRIC", 8));
+        wards.emplace("EMERGENCY", Ward("EMERGENCY", 4));
+        wards.emplace("ISOLATION", Ward("ISOLATION", 5));
+    }
+
+    void logStep(State s, int head, const string &note, const string &rule) {
+        log.push_back({++stepCounter, s, head, note, rule});
+    }
+
+    // Runs the TM for a single patient; returns true if allocated
+    bool run(const Patient &p, string &outWard, int &outBed) {
+        log.clear();
+        stepCounter = 0;
+        Tape tape;
+        tape.build(p);
+        State state = State::READ_PATIENT;
+
+        // ---- q0: READ_PATIENT ----
+        logStep(state, tape.head, "Reading patient ID: " + p.id,
+                "delta(READ_PATIENT, PatientID) -> move R, goto CHECK_SEVERITY");
+        tape.head++;
+        state = State::CHECK_SEVERITY;
+
+        // ---- q1: CHECK_SEVERITY ----
+        logStep(state, tape.head, "Severity = " + severityName(p.severity),
+                "delta(CHECK_SEVERITY, " + severityName(p.severity) + ") -> determine eligible wards");
+        state = State::SCAN_WARD;
+
+        // ---- q2: SCAN_WARD  (loop over eligible wards) ----
+        vector<string> eligible = wardAcceptance[p.severity];
+        bool allocated = false;
+
+        for (auto &wname : eligible) {
+            tape.head = 3; // conceptually pointing at WardPref / current scan cell
+            Ward &w = wards.at(wname);
+            int free = w.freeBeds();
+
+            logStep(State::SCAN_WARD, tape.head,
+                    "Scanning ward " + wname + " (" + to_string(free) + " free)",
+                    "delta(SCAN_WARD, " + wname + ") -> check bed availability");
+
+            if (free > 0) {
+                // ---- q3: MATCH_FOUND ----
+                logStep(State::MATCH_FOUND, tape.head,
+                        "Match found in " + wname,
+                        "delta(MATCH_FOUND, Available) -> goto ALLOCATE");
+
+                // ---- q5: ALLOCATE ----
+                int bedIdx = -1;
+                for (size_t i = 0; i < w.beds.size(); i++) {
+                    if (w.beds[i].empty()) { bedIdx = (int)i; break; }
+                }
+                w.beds[bedIdx] = p.id;
+
+                tape.insertBeforeRightMarker(wname, "Ward");
+                tape.insertBeforeRightMarker("BED-" + to_string(bedIdx + 1), "BedNo");
+
+                logStep(State::ALLOCATE, (int)tape.cells.size() - 3,
+                        "Allocated " + wname + " Bed " + to_string(bedIdx + 1),
+                        "delta(ALLOCATE, Bed" + to_string(bedIdx + 1) + ") -> write ward+bed, goto UPDATE_TAPE");
+
+                // ---- q6: UPDATE_TAPE ----
+                tape.insertBeforeRightMarker("ALLOC_OK", "Status");
+                logStep(State::UPDATE_TAPE, (int)tape.cells.size() - 2,
+                        "Tape updated, allocation complete",
+                        "delta(UPDATE_TAPE, marker) -> goto HALT (ACCEPT)");
+
+                outWard = wname;
+                outBed  = bedIdx + 1;
+                allocated = true;
+
+                // ---- q7: HALT ----
+                logStep(State::HALT, (int)tape.cells.size() - 1,
+                        "Machine halted: " + p.id + " -> " + wname + " Bed " + to_string(bedIdx + 1),
+                        "delta(HALT, marker) -> ACCEPT");
+                break;
+            } else {
+                // ---- q4: NO_MATCH ----
+                logStep(State::NO_MATCH, tape.head,
+                        wname + " full, trying next eligible ward",
+                        "delta(NO_MATCH, Full) -> move head, continue scan (loop back to SCAN_WARD)");
+            }
+        }
+
+        if (!allocated) {
+            logStep(State::HALT, (int)tape.cells.size() - 1,
+                    "No beds available for severity " + severityName(p.severity) + ". Patient queued.",
+                    "delta(HALT, end-marker) -> REJECT");
+        }
+
+        return allocated;
+    }
+
+    void printLog() const {
+        cout << "\n----------------------------------------------------------------------\n";
+        cout << " STEP  STATE              HEAD   DESCRIPTION\n";
+        cout << "----------------------------------------------------------------------\n";
+        for (auto &s : log) {
+            cout << setw(4)  << s.stepNo << "   "
+                 << left << setw(16) << stateName(s.state) << right
+                 << setw(5)  << s.head << "   "
+                 << s.note << "\n";
+            cout << "        -> " << s.rule << "\n";
+        }
+        cout << "----------------------------------------------------------------------\n";
+    }
+
+    void printWardStatus() const {
+        cout << "\n=========== WARD STATUS ===========\n";
+        for (auto &kv : wards) {
+            const Ward &w = kv.second;
+            cout << left << setw(12) << w.name
+                 << " : " << (w.totalBeds - w.freeBeds()) << "/" << w.totalBeds
+                 << " occupied  [";
+            for (auto &b : w.beds) cout << (b.empty() ? '.' : 'X');
+            cout << "]\n";
+        }
+        cout << "====================================\n";
+    }
+};
+
+// ───────────────────────────── Demo / Main ───────────────────────────────────
+
+void printBanner() {
+    cout << "========================================================================\n";
+    cout << "   HOSPITAL BED ALLOCATION SYSTEM -- TURING MACHINE SIMULATION (C++)\n";
+    cout << "   Automata Theory Class Project\n";
+    cout << "========================================================================\n";
+}
+
+int main() {
+    printBanner();
+
+    HospitalTM tm;
+
+    vector<Patient> patients = {
+        {"P001", "Alice M.", CRITICAL, "ICU"},
+        {"P002", "Bob K.",   MEDIUM,   "GENERAL"},
+        {"P003", "Carol S.", HIGH,     "EMERGENCY"},
+        {"P004", "David R.", LOW,      "PEDIATRIC"},
+        {"P005", "Eve T.",   CRITICAL, "ISOLATION"},
+        {"P006", "Frank L.", HIGH,     "ICU"},   // will likely fill remaining ICU beds
+        {"P007", "Grace P.", CRITICAL, "ICU"},
+    };
+
+    for (auto &p : patients) {
+        cout << "\n\n############################################################\n";
+        cout << "  ADMITTING PATIENT: " << p.name << " (" << p.id << ")\n";
+        cout << "  Severity: " << severityName(p.severity)
+             << " | Ward Preference: " << p.wardPref << "\n";
+        cout << "############################################################\n";
+
+        string ward; int bed;
+        bool ok = tm.run(p, ward, bed);
+        tm.printLog();
+
+        if (ok) {
+            cout << "\n RESULT: ALLOCATED -> Ward = " << ward << ", Bed = " << bed << "\n";
+        } else {
+            cout << "\n RESULT: REJECTED -> No beds available, patient added to queue.\n";
+        }
+    }
+
+    tm.printWardStatus();
+
+    cout << "\nDemo complete. This program models the TM states:\n";
+    cout << " READ_PATIENT -> CHECK_SEVERITY -> SCAN_WARD -> "
+            "(MATCH_FOUND -> ALLOCATE -> UPDATE_TAPE -> HALT)\n";
+    cout << "                                  -> (NO_MATCH -> retry / HALT-reject)\n";
+
+    return 0;
+}
